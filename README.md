@@ -1,5 +1,9 @@
 # Motion–Scene Pretrain
 
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/linjiw/motion-scene-pretrain/blob/main/notebooks/MotionScene_Pretrain_Colab.ipynb)
+
+**Google Colab:** open the notebook above, select a GPU runtime, and run the cells in order. Supply the dataset archive through Google Drive or the upload picker. The default is a short pilot; dropdowns select full training and masked/forecast/flow recipes. Completed stages can be saved to Drive, and the final cell downloads a report with the cost of every stage. [Colab instructions](docs/COLAB.md).
+
 A portable **non-RL** research package for motion representations, scene attention, two-second future prediction, and conditional flow generation. Designed to start on one 16–24 GB GPU. The code needs NumPy and PyTorch; it does not need Isaac Sim, SONIC, MuJoCo, robot assets, or the original Flow checkout.
 
 The first research question is whether scene-aware pretraining improves useful motion representations over a motion-and-goal baseline at a matched training budget. Attention and uncertainty are measurable outputs, not assumed explanations or safety certificates. Start with the simpler comparisons before increasing model size.
@@ -36,10 +40,10 @@ The source's official development/fresh/sealed data are excluded. The package's 
 
 ## Start on the remote machine
 
-Clone this private repository, copy the separately supplied dataset archive and its `.sha256` file, and install PyTorch for the machine's CUDA/driver combination using the [official installer](https://pytorch.org/get-started/locally/). Python 3.11 is the tested version; package requirement is Python 3.10+.
+Clone this public repository, copy the separately supplied dataset archive and its `.sha256` file, and install PyTorch for the machine's CUDA/driver combination using the [official installer](https://pytorch.org/get-started/locally/). Python 3.11 is the tested version; package requirement is Python 3.10+.
 
 ```bash
-git clone git@github.com:linjiw/motion-scene-pretrain.git
+git clone https://github.com/linjiw/motion-scene-pretrain.git
 cd motion-scene-pretrain
 python3 -m venv .venv
 source .venv/bin/activate

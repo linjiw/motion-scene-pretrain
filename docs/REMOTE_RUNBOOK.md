@@ -4,7 +4,7 @@ Target: one 16–24 GB GPU. The initial package is CPU-smoke-tested; GPU through
 
 ## Transfer
 
-Clone the private repository using your existing GitHub access. Transfer `kimodo-passage-h25-f100-v1.tar.xz` and its `.sha256` sidecar using your usual private `scp`/`rsync` route. These two local files are the data handoff; the Git repository contains code, schema, and documentation. The repository is not a dataset hosting service.
+Clone the public repository using HTTPS. Transfer `kimodo-passage-h25-f100-v1.tar.xz` and its `.sha256` sidecar using your usual private `scp`/`rsync` route. These two local files are the data handoff; the Git repository contains code, schema, and documentation. For Google Colab, use the [notebook instructions](COLAB.md) instead of installing a separate CUDA environment. The repository is not a dataset hosting service.
 
 ```bash
 # Run from the directory containing the received archive and checksum.
