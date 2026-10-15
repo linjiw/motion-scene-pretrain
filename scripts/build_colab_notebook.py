@@ -24,7 +24,7 @@ Learn motion representations and two-second futures **without RL**. This noteboo
 
 **Before Run all**
 1. Select **Runtime → Change runtime type → GPU**.
-2. Have the separately supplied `kimodo-passage-h25-f100-v1.tar.xz` archive ready on your computer (about **435 MiB**). Cell 3 opens a file picker if the archive is not already in your Google Drive folder `motion-scene-pretrain`. The public code repository does not include the dataset.
+2. Keep the separately supplied `kimodo-passage-h25-f100-v1.tar.xz` archive in your Google Drive folder `motion2scene` (about **435 MiB**). Cell 3 reuses that archive and opens a file picker only if it is missing. The public code repository does not include the dataset.
 3. Leave **pilot** selected for the first run. Authorize Drive when prompted if using it.
 
 The data contain generated reference motions with hindsight scenes, not physical collision labels. A lower training loss does not establish navigation performance.
@@ -35,7 +35,7 @@ The data contain generated reference motions with hindsight scenes, not physical
 cell("code", '''
 #@title 1. Settings
 DATA_SOURCE = "drive" #@param ["drive", "upload"]
-DRIVE_ARCHIVE_PATH = "/content/drive/MyDrive/motion-scene-pretrain/kimodo-passage-h25-f100-v1.tar.xz" #@param {type:"string"}
+DRIVE_ARCHIVE_PATH = "/content/drive/MyDrive/motion2scene/kimodo-passage-h25-f100-v1.tar.xz" #@param {type:"string"}
 SAVE_TO_DRIVE = True #@param {type:"boolean"}
 DRIVE_RESULTS_FOLDER = "/content/drive/MyDrive/motion-scene-pretrain/results" #@param {type:"string"}
 PROFILE = "pilot" #@param ["smoke", "pilot", "full"]
