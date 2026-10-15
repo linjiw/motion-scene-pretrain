@@ -41,12 +41,52 @@ def score_prediction(error, variance, valid):
             "scalar_elements": int(len(e))}
 
 
+def physical_rmse(error, valid, std):
+    physical = {}
+    physical_error = error * std
+    for name, begin, end, unit in [("height", 0, 1, "m"), ("planar_velocity", 4, 6, "m/s"),
+                                    ("yaw_rate", 6, 7, "rad/s"), ("joint_position", 7, 36, "rad"),
+                                    ("joint_velocity", 36, 65, "rad/s")]:
+        e = physical_error[..., begin:end]
+        keep = np.broadcast_to(valid[..., None], e.shape)
+        physical[name] = {"rmse": float(np.sqrt(np.mean(e[keep]**2))), "unit": unit}
+    return physical
+
+
+def horizon_slices(error, valid, fps):
+    for start, stop in ((0, int(fps)), (int(fps), int(2 * fps))):
+        stop = min(stop, error.shape[1])
+        if start < stop and valid[:, start:stop].any():
+            yield f"{start/fps:g}-{stop/fps:g}s", slice(start, stop)
+
+
+def point_metrics(error, valid, std, fps, group_ids=None):
+    """Point-prediction errors; do not assign uncertainty to naive baselines."""
+    def mse(e, mask):
+        return float(np.mean(e[np.broadcast_to(mask[..., None], e.shape)]**2))
+
+    result = {"mse_normalized": mse(error, valid),
+              "physical_rmse": physical_rmse(error, valid, std),
+              "by_horizon": {name: {"mse_normalized": mse(error[:, part], valid[:, part])}
+                             for name, part in horizon_slices(error, valid, fps)}}
+    if group_ids is not None:
+        result["by_group"] = {}
+        for group in sorted(set(group_ids)):
+            selected = group_ids == group
+            result["by_group"][group] = {"windows": int(selected.sum()),
+                                         "mse_normalized": mse(error[selected], valid[selected])}
+        result["equal_group_mean_mse_normalized"] = float(np.mean([
+            entry["mse_normalized"] for entry in result["by_group"].values()]))
+    return result
+
+
 @torch.no_grad()
 def collect(model, checkpoint, dataset, device, batch_size=32, samples=4,
             flow_steps=16, interventions=True, seed=0):
     torch.manual_seed(seed)
     means, variances, targets, valids, scene_delta, shuffled_delta = [], [], [], [], [], []
     flow_error, flow_oracle_error, flow_diversity = [], [], []
+    last_observed, scene_presence = [], []
     attention_snapshot = None
     std = np.asarray(checkpoint["normalizer"]["std"])
     for raw in DataLoader(dataset, batch_size=batch_size, collate_fn=collate):
@@ -59,26 +99,35 @@ def collect(model, checkpoint, dataset, device, batch_size=32, samples=4,
         variances.append(pred["logvar"].exp().cpu().numpy())
         targets.append(batch["future"].cpu().numpy())
         valids.append(batch["future_mask"].cpu().numpy())
-        if attention_snapshot is None or (not any(attention_snapshot["scene_mask"]) and batch["scene_mask"].any()):
-            nonempty = batch["scene_mask"].any(1).nonzero()
-            example_index = int(nonempty[0, 0]) if len(nonempty) else 0
+        last_observed.append(batch["history"][:, -1].cpu().numpy())
+        nonempty = batch["scene_mask"].any(1)
+        scene_presence.append(nonempty.cpu().numpy())
+        if attention_snapshot is None and nonempty.any():
+            example_index = int(nonempty.nonzero()[0, 0])
             attention_snapshot = {"weights": pred["scene_attention"][example_index].cpu().tolist(),
                                   "scene": batch["scene"][example_index].cpu().tolist(),
                                   "scene_mask": batch["scene_mask"][example_index].cpu().tolist(),
                                   "note": "Last column is null token. Attention is descriptive, not causal importance."}
-        if interventions:
+        if interventions and nonempty.any():
             empty = model(batch["history"], batch["scene"], batch["goal"],
                           horizon=kwargs["horizon"], scene_mask=torch.zeros_like(batch["scene_mask"]),
                           future_mask=batch["future_mask"])
             valid = batch["future_mask"][..., None]
             denominator = (valid.sum((1, 2)) * batch["future"].shape[-1]).clamp_min(1)
-            scene_delta.append(((empty["forecast_mean"] - pred["forecast_mean"]).square().masked_fill(~valid, 0).sum((1, 2)) / denominator).cpu().numpy())
+            response = ((empty["forecast_mean"] - pred["forecast_mean"]).square().masked_fill(~valid, 0).sum((1, 2)) / denominator)
+            scene_delta.append(response[nonempty].cpu().numpy())
             # Whole scene geometry+mask moves together. This tests reliance, not valid counterfactual behavior.
-            shuffled = model(batch["history"], batch["scene"].roll(1, 0), batch["goal"],
-                             horizon=kwargs["horizon"], scene_mask=batch["scene_mask"].roll(1, 0),
-                             future_mask=batch["future_mask"])
-            if len(batch["history"]) > 1:
-                shuffled_delta.append(((shuffled["forecast_mean"] - pred["forecast_mean"]).square().masked_fill(~valid, 0).sum((1, 2)) / denominator).cpu().numpy())
+            rolled_scene, rolled_mask = batch["scene"].roll(1, 0), batch["scene_mask"].roll(1, 0)
+            active_scene = batch["scene"].masked_fill(~batch["scene_mask"][..., None], 0)
+            rolled_active = rolled_scene.masked_fill(~rolled_mask[..., None], 0)
+            changed = ((batch["scene_mask"] != rolled_mask).any(1)
+                       | (active_scene != rolled_active).flatten(1).any(1)) & nonempty
+            if changed.any():
+                shuffled = model(batch["history"], rolled_scene, batch["goal"],
+                                 horizon=kwargs["horizon"], scene_mask=rolled_mask,
+                                 future_mask=batch["future_mask"])
+                response = ((shuffled["forecast_mean"] - pred["forecast_mean"]).square().masked_fill(~valid, 0).sum((1, 2)) / denominator)
+                shuffled_delta.append(response[changed].cpu().numpy())
         if checkpoint["config"]["mode"] == "flow" and samples > 0:
             draws = torch.stack([sample_flow(model, batch, flow_steps) for _ in range(samples)], 1)
             valid = batch["future_mask"][:, None, :, None]
@@ -95,26 +144,20 @@ def collect(model, checkpoint, dataset, device, batch_size=32, samples=4,
     variance = np.concatenate(variances)
     target = np.concatenate(targets)
     valid = np.concatenate(valids)
+    present = np.concatenate(scene_presence)
     error = mean - target
-    physical_error = error * std
-    physical = {}
-    for name, begin, end, unit in [("height", 0, 1, "m"), ("planar_velocity", 4, 6, "m/s"),
-                                    ("yaw_rate", 6, 7, "rad/s"), ("joint_position", 7, 36, "rad"),
-                                    ("joint_velocity", 36, 65, "rad/s")]:
-        e = physical_error[..., begin:end]
-        keep = np.broadcast_to(valid[..., None], e.shape)
-        physical[name] = {"rmse": float(np.sqrt(np.mean(e[keep]**2))), "unit": unit}
     metrics = {"windows": len(mean), "uncalibrated": score_prediction(error, variance, valid),
-               "physical_rmse": physical,
+               "physical_rmse": physical_rmse(error, valid, std),
+               "scene_windows": {"nonempty": int(present.sum()), "empty": int((~present).sum())},
                "attention_example": attention_snapshot,
+               "attention_example_status": ("available" if attention_snapshot is not None
+                                            else "unsupported_no_nonempty_scenes"),
                "interpretation": "Offline reference prediction only; not physical collision or navigation success."}
     fps = checkpoint["model_config"]["fps"]
     metrics["by_horizon"] = {}
-    for start, stop in ((0, int(fps)), (int(fps), int(2 * fps))):
-        stop = min(stop, error.shape[1])
-        if start < stop and valid[:, start:stop].any():
-            metrics["by_horizon"][f"{start/fps:g}-{stop/fps:g}s"] = score_prediction(
-                error[:, start:stop], variance[:, start:stop], valid[:, start:stop])
+    for name, part in horizon_slices(error, valid, fps):
+        metrics["by_horizon"][name] = score_prediction(error[:, part], variance[:, part], valid[:, part])
+    group_ids = None
     if hasattr(dataset, "records"):
         metrics["ancestry_groups"] = len({r["group_id"] for r in dataset.records})
         group_ids = np.array([r["group_id"] for r in dataset.records])
@@ -125,18 +168,31 @@ def collect(model, checkpoint, dataset, device, batch_size=32, samples=4,
                 error[selection], variance[selection], valid[selection])}
         metrics["equal_group_mean_mse_normalized"] = float(np.mean([
             g["mse_normalized"] for g in metrics["by_group"].values()]))
-        present = np.array([r["scene_id"] != "empty" for r in dataset.records])
-        metrics["by_scene_presence"] = {}
-        for name, selection in (("archived_scene", present), ("empty_scene", ~present)):
-            if selection.any():
-                metrics["by_scene_presence"][name] = {"windows": int(selection.sum()), **score_prediction(
-                    error[selection], variance[selection], valid[selection])}
-    if scene_delta:
+    metrics["by_scene_presence"] = {}
+    for name, selection in (("archived_scene", present), ("empty_scene", ~present)):
+        if selection.any():
+            metrics["by_scene_presence"][name] = {"windows": int(selection.sum()), **score_prediction(
+                error[selection], variance[selection], valid[selection])}
+    metrics["baselines"] = {
+        "last_observed_state": {
+            "description": "Repeat every channel of the last observed state; no dynamics integration.",
+            **point_metrics(np.concatenate(last_observed)[:, None, :] - target, valid, std, fps, group_ids)},
+        "train_normalizer_mean": {
+            "description": "Constant train-only normalizer mean (zero in normalized coordinates).",
+            **point_metrics(-target, valid, std, fps, group_ids)},
+    }
+    if interventions:
         metrics["scene_interventions"] = {
-            "empty_scene_response_mse_normalized": float(np.mean(np.concatenate(scene_delta))),
+            "status": "supported" if present.any() else "unsupported_no_nonempty_scenes",
+            "nonempty_windows": int(present.sum()),
+            "empty_scene_response_windows": sum(len(x) for x in scene_delta),
+            "shuffled_scene_response_windows": sum(len(x) for x in shuffled_delta),
+            "empty_scene_response_mse_normalized": (float(np.mean(np.concatenate(scene_delta)))
+                                                     if scene_delta else None),
             "shuffled_scene_response_mse_normalized": (float(np.mean(np.concatenate(shuffled_delta)))
                                                        if shuffled_delta else None),
-            "interpretation": "Sensitivity does not prove relevance, correctness, or causal response to obstacles."}
+            "shuffle_status": "supported" if shuffled_delta else "unsupported_no_changed_nonempty_inputs",
+            "interpretation": "Only originally nonempty scenes contribute. Batch-rolled scenes contribute only when active geometry/masks change. Means weight eligible windows equally. Sensitivity does not prove correctness or causal obstacle response."}
     if flow_error:
         metrics["generation"] = {"samples_per_window": samples, "integration_steps": flow_steps,
                                  "sample_mean_mse_normalized": float(np.mean(flow_error)),
@@ -144,7 +200,7 @@ def collect(model, checkpoint, dataset, device, batch_size=32, samples=4,
                                  "sample_variance_normalized": float(np.mean(flow_diversity)),
                                  "interpretation": "Oracle best-of-K uses the reference for selection. Sample spread is not epistemic uncertainty."}
     return metrics, {"error": error, "variance": variance, "valid": valid,
-                     "prediction": mean, "target": target}
+                     "prediction": mean, "target": target, "scene_present": present}
 
 
 def main():
@@ -155,7 +211,7 @@ def main():
     p.add_argument("--split", choices=["val", "calibration", "test"], default="val")
     p.add_argument("--calibrate", action="store_true", help="Fit variance scale on calibration split only")
     p.add_argument("--calibration", help="Saved calibration.json from this checkpoint")
-    p.add_argument("--max-samples", type=int, default=1024)
+    p.add_argument("--max-samples", type=int, default=0, help="0 evaluates the full split (default); positive values take a prefix for smoke checks")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--samples", type=int, default=4)
     p.add_argument("--flow-steps", type=int, default=16)
@@ -163,6 +219,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--threads", type=int, default=4)
     args = p.parse_args()
+    if args.max_samples < 0:
+        p.error("--max-samples must be 0 (full split) or positive")
     if args.calibrate and (args.split != "calibration" or args.calibration):
         p.error("--calibrate requires --split calibration and cannot also apply a calibration file")
     if args.calibration and args.split == "calibration":
@@ -173,7 +231,7 @@ def main():
     manifest_hash = sha256(Path(args.data) / "manifest.json")
     if manifest_hash != checkpoint["dataset_manifest_sha256"]:
         raise ValueError("Dataset differs from checkpoint; explicit transfer evaluation is not implemented")
-    dataset = MixedSceneDataset(args.data, args.split, max_samples=args.max_samples)
+    dataset = MixedSceneDataset(args.data, args.split, max_samples=args.max_samples or None)
     if not len(dataset):
         raise ValueError("Requested split is empty")
     out = Path(args.output)
@@ -187,6 +245,10 @@ def main():
         metrics.update(split=args.split, checkpoint_sha256=receipt["checkpoint_sha256"],
                        dataset_manifest_sha256=manifest_hash,
                        evaluation_seed=args.seed)
+        available = getattr(dataset, "manifest", {}).get("counts", {}).get(args.split, len(dataset))
+        metrics["evaluation_scope"] = {"available_windows": available, "evaluated_windows": len(dataset),
+                                       "full_split": len(dataset) == available,
+                                       "max_samples": args.max_samples}
         if args.calibrate:
             select = np.broadcast_to(arrays["valid"][..., None], arrays["error"].shape)
             ratio = arrays["error"]**2 / np.maximum(arrays["variance"], 1e-10)
@@ -196,7 +258,9 @@ def main():
                 "unclipped_variance_scale": float(np.mean(ratio[select])), "scale_bounds": [.01, 100.],
                 "checkpoint_sha256": receipt["checkpoint_sha256"],
                 "dataset_manifest_sha256": manifest_hash, "windows": len(dataset),
-                "method": "Global Gaussian residual variance rescaling; no coverage guarantee"})
+                "evaluation_scope": metrics["evaluation_scope"],
+                "scene_windows": metrics.get("scene_windows"),
+                "method": "Global Gaussian NLL variance rescaling; not quantile calibration and no coverage guarantee"})
         if args.calibration:
             calibration = json.loads(Path(args.calibration).read_text())
             if calibration["fit_split"] != "calibration" or calibration["checkpoint_sha256"] != receipt["checkpoint_sha256"] or calibration["dataset_manifest_sha256"] != manifest_hash:
@@ -205,6 +269,19 @@ def main():
                 raise ValueError("Calibration variance scale must be finite and positive")
             metrics["calibrated"] = score_prediction(arrays["error"], arrays["variance"] * calibration["variance_scale"], arrays["valid"])
             metrics["calibration_variance_scale"] = calibration["variance_scale"]
+            calibrated_variance = arrays["variance"] * calibration["variance_scale"]
+            fps = checkpoint.get("model_config", {}).get("fps")
+            if fps is not None:
+                metrics["calibrated_by_horizon"] = {
+                    name: score_prediction(arrays["error"][:, part], calibrated_variance[:, part], arrays["valid"][:, part])
+                    for name, part in horizon_slices(arrays["error"], arrays["valid"], fps)}
+            if "scene_present" in arrays:
+                metrics["calibrated_by_scene_presence"] = {}
+                for name, selected in (("archived_scene", arrays["scene_present"]),
+                                       ("empty_scene", ~arrays["scene_present"])):
+                    if selected.any():
+                        metrics["calibrated_by_scene_presence"][name] = {"windows": int(selected.sum()), **score_prediction(
+                            arrays["error"][selected], calibrated_variance[selected], arrays["valid"][selected])}
         dump_json(out / "metrics.json", metrics)
         np.savez_compressed(out / "examples.npz", **{k: v[:8] for k, v in arrays.items()})
         receipt["status"] = "complete"

@@ -1,5 +1,7 @@
 # Run in Google Colab
 
+For the follow-up to the first A100 pilot, use the [controlled experiment notebook](https://colab.research.google.com/github/linjiw/motion-scene-pretrain/blob/main/notebooks/MotionScene_A100_Experiments.ipynb) and [protocol](A100_EXPERIMENTS.md). It reuses your Drive archive and repairs the original validation split's missing obstacle examples. The pilot notebook below remains available for basic setup checks.
+
 [Open the notebook](https://colab.research.google.com/github/linjiw/motion-scene-pretrain/blob/main/notebooks/MotionScene_Pretrain_Colab.ipynb).
 
 1. Select **Runtime → Change runtime type → GPU**.

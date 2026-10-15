@@ -74,12 +74,17 @@ def test_collect_excludes_padding_from_forecasts_and_generation(monkeypatch):
                   "config": {"mode": "flow"}, "model_config": {"fps": 50.}}
     metrics, arrays = evaluate.collect(Model(), checkpoint, rows, torch.device("cpu"),
                                        batch_size=2, samples=2)
-    assert len(calls) == 3
+    assert len(calls) == 1  # Empty inputs cannot support a scene intervention.
     assert metrics["generation"]["sample_mean_mse_normalized"] == 0
     assert metrics["generation"]["oracle_best_of_k_mse_normalized"] == 0
     assert metrics["generation"]["sample_variance_normalized"] == 0
     assert metrics["uncalibrated"]["scalar_elements"] == 2 * 5 * 65
-    assert metrics["scene_interventions"]["empty_scene_response_mse_normalized"] == 0
+    assert metrics["scene_interventions"]["status"] == "unsupported_no_nonempty_scenes"
+    assert metrics["scene_interventions"]["empty_scene_response_mse_normalized"] is None
+    assert metrics["scene_interventions"]["shuffled_scene_response_mse_normalized"] is None
+    assert metrics["scene_interventions"]["nonempty_windows"] == 0
+    assert metrics["attention_example"] is None
+    assert metrics["attention_example_status"] == "unsupported_no_nonempty_scenes"
     assert arrays["valid"].sum() == 10
 
 
@@ -89,12 +94,12 @@ def calibration_fixture(tmp_path, monkeypatch):
     write_json(data / "manifest.json", {"id": "tiny-test-data"})
     checkpoint_path = tmp_path / "checkpoint.pt"
     checkpoint_path.write_bytes(b"test checkpoint identity; load is mocked")
-    checkpoint = {"dataset_manifest_sha256": sha256(data / "manifest.json")}
+    checkpoint = {"dataset_manifest_sha256": sha256(data / "manifest.json"), "model_config": {"fps": 1.}}
     monkeypatch.setattr(evaluate, "load_model", lambda path, device: (object(), checkpoint))
     monkeypatch.setattr(evaluate, "MixedSceneDataset", lambda *args, **kwargs: [1, 2])
     arrays = {"error": np.full((2, 3, 1), 2.), "variance": np.ones((2, 3, 1)),
               "valid": np.ones((2, 3), bool), "prediction": np.full((2, 3, 1), 2.),
-              "target": np.zeros((2, 3, 1))}
+              "target": np.zeros((2, 3, 1)), "scene_present": np.array([True, False])}
 
     def fake_collect(*args, **kwargs):
         return {"uncalibrated": evaluate.score_prediction(arrays["error"], arrays["variance"], arrays["valid"])}, arrays
@@ -121,6 +126,114 @@ def test_calibration_cli_fits_variance_scale_and_applies_to_other_split(tmp_path
     assert metrics["uncalibrated"]["marginal_coverage_95"] == 0
     assert metrics["calibrated"]["marginal_coverage_95"] == 1
     assert metrics["calibrated"]["mean_std_normalized"] == 2
+    assert set(metrics["calibrated_by_horizon"]) == {"0-1s", "1-2s"}
+    assert metrics["calibrated_by_horizon"]["1-2s"]["marginal_coverage_95"] == 1
+    assert metrics["calibrated_by_scene_presence"]["archived_scene"]["windows"] == 1
+    assert metrics["calibrated_by_scene_presence"]["empty_scene"]["mean_std_normalized"] == 2
+
+
+class SceneDependentModel:
+    def __call__(self, history, scene, goal, **kwargs):
+        shape = (len(history), kwargs["horizon"], 65)
+        value = scene[..., 0].masked_fill(~kwargs["scene_mask"], 0).sum(1)
+        return {"forecast_mean": value[:, None, None].expand(shape), "logvar": torch.zeros(shape),
+                "scene_attention": torch.zeros(len(history), kwargs["horizon"], scene.shape[1] + 1)}
+
+
+def scene_row(value=0, present=False):
+    row = {"history": torch.zeros(6, 65), "future": torch.zeros(3, 65),
+           "scene": torch.zeros(2, 9), "scene_mask": torch.tensor([present, False]),
+           "goal": torch.zeros(4), "future_mask": torch.tensor([True, True, False])}
+    row["scene"][0, 0] = value
+    return row
+
+
+def evaluation_checkpoint():
+    return {"normalizer": {"mean": [0.] * 65, "std": [1.] * 65},
+            "config": {"mode": "forecast"}, "model_config": {"fps": 1.}}
+
+
+def test_scene_deltas_count_only_nonempty_changed_inputs():
+    rows = [scene_row(), scene_row(2, True), scene_row()]
+    metrics, _ = evaluate.collect(SceneDependentModel(), evaluation_checkpoint(), rows,
+                                  torch.device("cpu"), batch_size=3)
+    result = metrics["scene_interventions"]
+    assert result["status"] == "supported"
+    assert result["nonempty_windows"] == 1
+    assert result["empty_scene_response_windows"] == 1
+    assert result["shuffled_scene_response_windows"] == 1
+    assert result["empty_scene_response_mse_normalized"] == 4  # Not diluted by two empty scenes.
+    assert result["shuffled_scene_response_mse_normalized"] == 4
+    assert metrics["attention_example"]["scene_mask"] == [True, False]
+    assert metrics["attention_example"]["scene"][0][0] == 2
+    assert metrics["scene_windows"] == {"nonempty": 1, "empty": 2}
+
+
+def test_identical_active_scenes_do_not_support_shuffle_diagnostic():
+    rows = [scene_row(2, True), scene_row(2, True)]
+    rows[1]["scene"][1] = 123  # Padded values are not a changed effective scene.
+    metrics, _ = evaluate.collect(SceneDependentModel(), evaluation_checkpoint(), rows,
+                                  torch.device("cpu"), batch_size=2)
+    result = metrics["scene_interventions"]
+    assert result["empty_scene_response_windows"] == 2
+    assert result["shuffled_scene_response_windows"] == 0
+    assert result["shuffled_scene_response_mse_normalized"] is None
+    assert result["shuffle_status"] == "unsupported_no_changed_nonempty_inputs"
+
+
+def test_point_baselines_use_observed_history_train_mean_and_equal_groups():
+    class RecordedRows(list):
+        records = [{"group_id": group} for group in ("a", "b", "b")]
+
+    rows = RecordedRows()
+    for last in (4, 8, 8):
+        row = scene_row()
+        row["history"][:] = last
+        row["future"][0] = last + 2
+        row["future"][1] = last + 4
+        row["future"][2] = 1e8  # Invalid targets must not affect a baseline.
+        rows.append(row)
+    checkpoint = evaluation_checkpoint()
+    checkpoint["normalizer"] = {"mean": [2.] * 65, "std": [2.] * 65}
+    metrics, _ = evaluate.collect(SceneDependentModel(), checkpoint, rows, torch.device("cpu"), batch_size=3)
+    persistence = metrics["baselines"]["last_observed_state"]
+    constant = metrics["baselines"]["train_normalizer_mean"]
+    assert persistence["mse_normalized"] == pytest.approx(2.5)
+    assert persistence["physical_rmse"]["height"]["rmse"] == pytest.approx(math.sqrt(10))
+    assert persistence["by_horizon"]["0-1s"]["mse_normalized"] == 1
+    assert persistence["by_horizon"]["1-2s"]["mse_normalized"] == 4
+    assert constant["mse_normalized"] == pytest.approx((6.5 + 20.5 + 20.5) / 3)
+    assert constant["equal_group_mean_mse_normalized"] == pytest.approx((6.5 + 20.5) / 2)
+    assert constant["by_group"]["b"]["windows"] == 2
+    assert "marginal_coverage_95" not in persistence
+    assert "gaussian_nll_normalized" not in constant
+
+
+@pytest.mark.parametrize("limit,expected_limit,available,full", [(None, None, 2, True), (2, 2, 5, False)])
+def test_evaluation_default_uses_full_split_and_records_scope(tmp_path, monkeypatch, limit, expected_limit, available, full):
+    data, checkpoint_path = calibration_fixture(tmp_path, monkeypatch)
+    requested = []
+
+    class Dataset(list):
+        manifest = {"counts": {"val": available}}
+
+    def dataset(*args, **kwargs):
+        requested.append(kwargs["max_samples"])
+        return Dataset([1, 2])
+
+    monkeypatch.setattr(evaluate, "MixedSceneDataset", dataset)
+    output = tmp_path / "evaluation"
+    arguments = ["evaluate", "--checkpoint", str(checkpoint_path), "--data", str(data),
+                 "--output", str(output), "--threads", "1"]
+    if limit is not None:
+        arguments += ["--max-samples", str(limit)]
+    monkeypatch.setattr(sys, "argv", arguments)
+    evaluate.main()
+    assert requested == [expected_limit]
+    scope = json.loads((output / "metrics.json").read_text())["evaluation_scope"]
+    assert scope["available_windows"] == available
+    assert scope["evaluated_windows"] == 2
+    assert scope["full_split"] is full
 
 
 def test_calibration_rejects_other_checkpoint_and_records_failure(tmp_path, monkeypatch):

@@ -22,6 +22,8 @@ cell("markdown", """
 
 Learn motion representations and two-second futures **without RL**. This notebook installs the public package, verifies your dataset, runs a short pilot, and creates a report to send back.
 
+**For the next A100 comparisons, use the [A100 experiment notebook](https://colab.research.google.com/github/linjiw/motion-scene-pretrain/blob/main/notebooks/MotionScene_A100_Experiments.ipynb).** It fixes the original validation split's missing obstacle scenes and runs matched-budget controls with fresh models.
+
 **Before Run all**
 1. Select **Runtime → Change runtime type → GPU**.
 2. Keep the separately supplied `kimodo-passage-h25-f100-v1.tar.xz` archive in your Google Drive folder `motion2scene` (about **435 MiB**). Cell 3 reuses that archive and opens a file picker only if it is missing. The public code repository does not include the dataset.
@@ -64,7 +66,11 @@ from pathlib import Path
 
 REPO_URL = "https://github.com/linjiw/motion-scene-pretrain.git"
 WORK_ROOT = Path("/content")
-REPO = WORK_ROOT / "motion-scene-pretrain"
+# Load current code without modifying an older notebook's checkout.
+CHECKOUT_KEY = "MOTION_SCENE_PRETRAIN_CHECKOUT"
+if CHECKOUT_KEY not in globals():
+    globals()[CHECKOUT_KEY] = WORK_ROOT / ("motion-scene-code-" + uuid.uuid4().hex[:8])
+REPO = globals()[CHECKOUT_KEY]
 if not REPO.exists():
     subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(REPO)], check=True)
 else:
@@ -84,6 +90,10 @@ subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-deps", 
 # Make the editable package visible immediately, without a kernel restart.
 if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
+# A shared runtime may have imported an older package checkout already.
+for module_name in list(sys.modules):
+    if module_name == "motion_scene_pretrain" or module_name.startswith("motion_scene_pretrain."):
+        del sys.modules[module_name]
 os.environ["OMP_NUM_THREADS"] = "2"
 os.chdir(REPO)
 if DEVICE == "cuda" and not torch.cuda.is_available():
@@ -244,7 +254,7 @@ for index, (mode, steps) in enumerate(([('masked',pretrain_steps)] if pretrain e
     cfg = json.loads((REPO/"configs"/filename).read_text())
     cfg.update(device=DEVICE, seed=SEED, steps=steps, batch_size=BATCH_SIZE,
                workers=0, cpu_threads=2, log_every=25 if PROFILE != "full" else 100,
-               eval_every=steps, val_batches=2 if PROFILE != "full" else 8)
+               eval_every=min(steps,500), val_batches=None, max_val_samples=None)
     if PROFILE == "smoke":
         cfg.update(model={"width":32,"heads":4,"layers":1,"fps":50.0},
                    max_train_samples=64, max_val_samples=16, batch_size=min(BATCH_SIZE,4))
@@ -306,9 +316,10 @@ for axis,stage in zip(axes[0],stages):
     axis.set(xlabel="Optimizer step",ylabel="Training objective",title=stage["mode"])
 plt.tight_layout()
 plt.show()
-receipt = json.loads((FINAL_RUN/"receipt.json").read_text())
-print({"elapsed_seconds": receipt["elapsed_seconds"],
-       "peak_cuda_allocated_GiB": receipt["max_cuda_allocated_bytes"]/2**30})
+receipts = [json.loads((s["output"]/"receipt.json").read_text()) for s in stages]
+print({"all_stages_training_seconds": sum(r["elapsed_seconds"] for r in receipts),
+       "peak_cuda_allocated_GiB": max(r["max_cuda_allocated_bytes"] for r in receipts)/2**30})
+print("These are minibatch objectives, not a validation learning curve. Gaussian NLL can be negative.")
 ''', "curves")
 
 cell("code", '''
@@ -317,7 +328,7 @@ EVAL_ROOT = RUN_ROOT / ("evaluation-" + uuid.uuid4().hex[:6])
 EVAL_ROOT.mkdir()
 CAL = EVAL_ROOT/"calibration"
 VAL = EVAL_ROOT/"validation"
-eval_limit = 16 if PROFILE == "smoke" else (128 if PROFILE == "pilot" else 1024)
+eval_limit = 16 if PROFILE == "smoke" else 0  # 0 evaluates the full split.
 draws, flow_steps = (2,4) if PROFILE == "smoke" else ((2,8) if PROFILE == "pilot" else (4,16))
 shared = ["--checkpoint",CHECKPOINT,"--data",DATA,"--device",DEVICE,
           "--batch-size",min(BATCH_SIZE,16),"--max-samples",eval_limit,"--seed",SEED]
@@ -332,6 +343,8 @@ metrics = json.loads((VAL/"metrics.json").read_text())
 print("Validation MSE:",metrics["uncalibrated"]["mse_normalized"])
 print("95% marginal coverage, before/after:",metrics["uncalibrated"]["marginal_coverage_95"],metrics["calibrated"]["marginal_coverage_95"])
 print("Calibration applies to forecast residuals; it is not collision-risk calibration.")
+if metrics.get("scene_windows", {}).get("nonempty",0) == 0:
+    print("This validation split has no obstacle scenes; scene attention cannot be assessed. Use the separate A100 notebook's fresh v2 protocol.")
 ''', "evaluate")
 
 cell("code", '''

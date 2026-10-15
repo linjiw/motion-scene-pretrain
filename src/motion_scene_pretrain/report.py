@@ -48,6 +48,11 @@ def main():
         coords = " ".join(f"{40+640*(x-xmin)/max(xmax-xmin,1):.1f},{190-150*(y-ymin)/max(ymax-ymin,1e-8):.1f}" for x,y in points)
         svg = f'<svg viewBox="0 0 720 225" role="img" aria-label="Training loss versus optimizer steps"><polyline points="{coords}" fill="none" stroke="#187b8b" stroke-width="3"/><text x="40" y="218">Step {xmin}</text><text x="580" y="218">Step {xmax}</text><text x="40" y="22">Loss range {ymin:.4g}–{ymax:.4g}</text></svg>'
     body = html.escape(json.dumps(summary, indent=2))
+    notices = []
+    for metrics in evaluations:
+        if metrics.get("scene_windows", {}).get("nonempty") == 0:
+            notices.append(f"{html.escape(metrics.get('split', 'Evaluation'))}: no nonempty scenes; obstacle attention and scene-response diagnostics are unsupported.")
+    notice = ''.join(f'<p style="background:#fff3cf;padding:14px">{message}</p>' for message in notices)
     heatmap = ""
     example = next((x for x in attention_examples if x is not None), None)
     if example:
@@ -61,7 +66,7 @@ def main():
             name = "null" if obstacle == len(weights[0])-1 else str(obstacle)
             boxes.append(f'<text x="5" y="{obstacle*18+37}" font-size="12">{name}</text>')
         heatmap = f'<p>Example future-to-scene attention: columns are future timesteps; rows are obstacle indices and null. Darker means larger weight. This is not causal importance.</p><svg viewBox="0 0 {60+len(weights)*6} {50+len(weights[0])*18}" role="img" aria-label="Attention weights over future time">{"".join(boxes)}</svg>'
-    (out / "report.html").write_text(f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Motion-scene pretraining report</title><style>body{{max-width:1050px;margin:40px auto;padding:0 24px;font:16px system-ui;color:#183340}}svg{{max-width:720px;width:100%}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f6f8;padding:20px;border-radius:12px}}h1{{font-size:28px}}</style><h1>Motion-scene pretraining report</h1><p>Offline prediction and representation learning. These results do not establish physical collision avoidance.</p>{svg}{heatmap}<pre>{body}</pre></html>')
+    (out / "report.html").write_text(f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Motion-scene pretraining report</title><style>body{{max-width:1050px;margin:40px auto;padding:0 24px;font:16px system-ui;color:#183340}}svg{{max-width:720px;width:100%}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f6f8;padding:20px;border-radius:12px}}h1{{font-size:28px}}</style><h1>Motion-scene pretraining report</h1><p>Offline prediction and representation learning. These results do not establish physical collision avoidance.</p>{notice}{svg}{heatmap}<pre>{body}</pre></html>')
     files = {"summary.json": out / "summary.json", "report.html": out / "report.html"}
     for name in ("receipt.json", "config.json", "normalizer.json", "metrics.jsonl"):
         files[f"training/{name}"] = run / name

@@ -1,0 +1,11 @@
+{
+  "name": "kimodo-passage-h25-f100-v2-sceneholdout",
+  "parent_manifest_sha256": "1d65ecce47b37dbb3ffce6b651484f79f4567a5a15f929f80c79c7bb56c8659a",
+  "dataset_manifest_sha256": "4cf4391553d126c5da4ea04ca79f873ea9d714a83f905f1f71a1a59eed4ad128",
+  "scene_groups": 2,
+  "seed": 20261015,
+  "counts": {"train": 18495, "val": 585, "calibration": 585, "test": 335},
+  "scene_rows": {"train": 2998, "val": 180, "calibration": 150, "test": 120},
+  "requires_fresh_models": true,
+  "note": "Derive locally from the original private archive. Do not reuse parent-trained weights or normalizer. Test remains frozen."
+}

@@ -1,5 +1,8 @@
 """Training contracts: honest masks, causal conditioning, and flow direction."""
 
+import json
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -8,7 +11,8 @@ from motion_scene_pretrain.common import (
     collate, fit_normalizer, masked_mean, prepare, sample_flow,
 )
 from motion_scene_pretrain.model import ModelConfig, MotionSceneModel
-from motion_scene_pretrain.train import objective, validate
+from motion_scene_pretrain import train
+from motion_scene_pretrain.train import objective, sampling_weights, validate
 
 
 class TinyDataset:
@@ -222,3 +226,145 @@ def test_normalizer_requires_explicit_training_split_metadata():
     row = {"history": np.zeros((2, 65)), "future": np.ones((3, 65))}
     with pytest.raises(ValueError, match="training split"):
         fit_normalizer([row])
+
+
+@pytest.mark.parametrize("mode,expected_calls", [("forecast", 1), ("flow", 2), ("masked", 1)])
+def test_zero_auxiliary_weight_skips_reconstruction_pass(mode, expected_calls):
+    class Recorder(MotionSceneModel):
+        def __init__(self):
+            super().__init__(ModelConfig(width=32, heads=4, layers=1))
+            self.observed = []
+
+        def forward(self, *args, **kwargs):
+            self.observed.append(kwargs.get("history_observed"))
+            return super().forward(*args, **kwargs)
+
+    model = Recorder()
+    loss, metrics = objective(model, make_batch(), mode, reconstruction_weight=0)
+    loss.backward()
+    assert len(model.observed) == expected_calls
+    assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters()
+               if parameter.grad is not None)
+    if mode == "masked":
+        assert model.observed[0] is not None and "masked_mse" in metrics
+    else:
+        assert all(observed is None for observed in model.observed)
+        assert "masked_mse" not in metrics  # It was not measured, rather than a zero error.
+
+
+def test_scene_group_weights_control_global_scene_mass_without_duplicate_bias():
+    records = ([{"group_id": "a", "scene_id": "obstacle-a"}] * 9
+               + [{"group_id": "a", "scene_id": "empty"}]
+               + [{"group_id": "b", "scene_id": "obstacle-b"}]
+               + [{"group_id": "b", "scene_id": "empty"}] * 3
+               + [{"group_id": "c", "scene_id": "empty"}] * 100)
+    weights = sampling_weights(records, "scene_group", scene_fraction=.25)
+    assert sum(weights) == pytest.approx(1)
+    mass = lambda group, present: sum(weight for row, weight in zip(records, weights)
+                                      if row["group_id"] == group and (row["scene_id"] != "empty") == present)
+    assert mass("a", True) == pytest.approx(.125)
+    assert mass("b", True) == pytest.approx(.125)
+    assert all(mass(group, False) == pytest.approx(.25) for group in "abc")
+    old = sampling_weights(records, "group_scene")
+    for group in "abc":
+        assert sum(weight for row, weight in zip(records, old)
+                   if row["group_id"] == group) == pytest.approx(1 / 3)
+    assert sum(weight for row, weight in zip(records, old)
+               if row["scene_id"] != "empty") == pytest.approx(1 / 3)
+    uniform = sampling_weights(records, "uniform_window")
+    assert all(weight == pytest.approx(1 / len(records)) for weight in uniform)
+
+
+def test_scene_group_rejects_unavailable_requested_category():
+    records = [{"group_id": "a", "scene_id": "empty"}]
+    with pytest.raises(ValueError, match="unavailable"):
+        sampling_weights(records, "scene_group", .25)
+    assert sampling_weights(records, "scene_group", 0) == [1.]
+    for fraction in (-.1, 1.1, float("nan")):
+        with pytest.raises(ValueError, match="scene_fraction"):
+            sampling_weights(records, "scene_group", fraction)
+
+
+def test_full_validation_weights_valid_elements_and_short_final_batch():
+    class ZeroPredictor(torch.nn.Module):
+        def forward(self, history, scene, goal, *, horizon, **kwargs):
+            shape = (len(history), horizon, 65)
+            return {"forecast_mean": torch.zeros(shape), "logvar": torch.zeros(shape)}
+
+    batch_a = make_batch()
+    batch_a["future"].fill_(1.)
+    batch_a["future_mask"][:] = False
+    batch_a["future_mask"][:, 0] = True
+    batch_b = {key: value[:1].clone() for key, value in make_batch().items()}
+    batch_b["future"].fill_(3.)
+    batch_b["future_mask"][:] = True
+    model = ZeroPredictor().eval()
+    result = validate(model, [batch_a, batch_b], {"mean": [0.] * 65, "std": [1.] * 65},
+                      torch.device("cpu"), "forecast", max_batches=None, reconstruction_weight=0)
+    assert result["forecast_mse_normalized"] == pytest.approx(92 / 12)
+    assert result["forecast_nll_no_constant"] == pytest.approx(46 / 12)
+    assert result["loss"] == pytest.approx(.55 * 92 / 12)
+    assert result["windows"] == 3 and result["batches"] == 2
+    assert result["valid_future_frames"] == 12
+    assert not model.training
+
+
+@pytest.mark.parametrize("drop_last,expected_presentations", [(False, 8), (True, 9)])
+def test_run_records_actual_exposure_and_independent_validation_cadence(
+    tmp_path, monkeypatch, drop_last, expected_presentations,
+):
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    manifest = {"state_dim": 65, "scene_dim": 9, "goal_dim": 4, "fps": 50.}
+    (data_root / "manifest.json").write_text(json.dumps(manifest))
+
+    class Dataset:
+        def __init__(self, root, split, max_samples=None):
+            self.split, self.manifest = split, manifest
+            count = 5 if split == "train" else 4
+            self.records = [{"group_id": "a" if i % 2 else "b",
+                             "scene_id": "obstacle" if i % 2 else "empty"}
+                            for i in range(count)]
+
+        def __len__(self):
+            return len(self.records)
+
+        def __getitem__(self, index):
+            if index >= len(self):
+                raise IndexError(index)
+            base = make_batch()
+            row = {key: value[index % 2].clone() for key, value in base.items()}
+            row["future_mask"][:] = True
+            row["metadata"] = self.records[index]
+            return row
+
+    monkeypatch.setattr(train, "MixedSceneDataset", Dataset)
+    config = {"mode": "forecast", "device": "cpu", "seed": 3, "steps": 3,
+              "batch_size": 3, "drop_last": drop_last, "sampling": "scene_group",
+              "scene_fraction": .25, "reconstruction_weight": 0,
+              "workers": 0, "cpu_threads": 1, "log_every": 3, "eval_every": 2,
+              "val_batches": None, "max_val_samples": None,
+              "model": {"width": 16, "heads": 4, "layers": 1}}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config))
+    output = tmp_path / "run"
+    args = SimpleNamespace(config=str(config_path), data=str(data_root), output=str(output),
+                           steps=None, seed=None, device=None, init=None, dry_run=False)
+    train.run(args)
+    receipt = json.loads((output / "receipt.json").read_text())
+    assert receipt["status"] == "complete"
+    assert receipt["actual_sample_presentations"] == expected_presentations
+    assert receipt["presentations"]["windows"] == expected_presentations
+    assert receipt["presentations"]["history_frames"] == expected_presentations * 6
+    assert receipt["presentations"]["valid_future_frames"] == expected_presentations * 10
+    assert sum(receipt["presentations"]["scene_counts"].values()) == expected_presentations
+    assert sum(receipt["presentations"]["group_counts"].values()) == expected_presentations
+    assert receipt["sampling"]["expected_scene_probability"]["scene"] == pytest.approx(.25)
+    assert receipt["completed_optimizer_steps"] == 3
+    assert receipt["windows_per_second"] > 0
+    assert receipt["max_cuda_allocated_bytes"] == receipt["max_cuda_reserved_bytes"] == 0
+    assert receipt["initialization"]["exact_resume"] is False
+    rows = [json.loads(line) for line in (output / "metrics.jsonl").read_text().splitlines()]
+    assert [row["step"] for row in rows if "validation" in row] == [2, 3]
+    assert all(row["validation"]["windows"] == 4 for row in rows if "validation" in row)
+    assert (output / "checkpoint.pt").exists()

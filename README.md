@@ -1,5 +1,7 @@
 # Motion–Scene Pretrain
 
+**A100 follow-up:** [Open the controlled experiment notebook](https://colab.research.google.com/github/linjiw/motion-scene-pretrain/blob/main/notebooks/MotionScene_A100_Experiments.ipynb). It reuses the Drive archive, builds a fixed scene-bearing validation split, and compares five fresh models at matched training exposure. [Pilot review and experiment protocol](docs/A100_EXPERIMENTS.md).
+
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/linjiw/motion-scene-pretrain/blob/main/notebooks/MotionScene_Pretrain_Colab.ipynb)
 
 **Google Colab:** open the notebook above, select a GPU runtime, and run the cells in order. Supply the dataset archive through Google Drive or the upload picker. The default is a short pilot; dropdowns select full training and masked/forecast/flow recipes. Completed stages can be saved to Drive, and the final cell downloads a report with the cost of every stage. [Colab instructions](docs/COLAB.md).

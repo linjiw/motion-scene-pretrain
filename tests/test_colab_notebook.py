@@ -1,5 +1,6 @@
 """Structural checks for the real notebook, including executable Python cells."""
 import ast
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -7,15 +8,18 @@ from pathlib import Path
 import shutil
 import sys
 from types import ModuleType, SimpleNamespace
+import uuid
 
 import pytest
 
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks/MotionScene_Pretrain_Colab.ipynb"
+A100_NOTEBOOK = NOTEBOOK.with_name("MotionScene_A100_Experiments.ipynb")
 
 
-def test_notebook_is_clean_and_all_code_compiles():
-    notebook = json.loads(NOTEBOOK.read_text())
+@pytest.mark.parametrize("path", [NOTEBOOK, A100_NOTEBOOK])
+def test_notebook_is_clean_and_all_code_compiles(path):
+    notebook = json.loads(path.read_text())
     assert notebook["nbformat"] == 4
     assert notebook["metadata"]["accelerator"] == "GPU"
     identifiers = []
@@ -26,6 +30,65 @@ def test_notebook_is_clean_and_all_code_compiles():
             assert cell["outputs"] == []
             ast.parse("".join(cell["source"]), filename=cell["id"])
     assert len(set(identifiers)) == len(identifiers)
+
+
+def _a100_settings(overrides=None):
+    cells = {c["id"]: "".join(c["source"]) for c in json.loads(A100_NOTEBOOK.read_text())["cells"]}
+    tree = ast.parse(cells["settings"])
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            name = statement.targets[0].id
+            if name in (overrides or {}):
+                statement.value = ast.Constant(overrides[name])
+    namespace = {}
+    exec(compile(ast.fix_missing_locations(tree), "a100-settings", "exec"), namespace)
+    return cells, namespace
+
+
+def test_a100_settings_default_to_screen_and_existing_drive_archive():
+    _, settings = _a100_settings()
+    assert settings["SUITE"] == "screen"
+    assert settings["BATCH_SIZE"] == 64
+    assert settings["DATA_SOURCE"] == "drive"
+    assert settings["DRIVE_ARCHIVE_PATH"] == "/content/drive/MyDrive/motion2scene/kimodo-passage-h25-f100-v1.tar.xz"
+    assert settings["SEEDS"] == "" and settings["ARMS"] == ""
+    with pytest.raises(ValueError, match="CPU.*smoke"):
+        _a100_settings({"DEVICE": "cpu"})
+
+
+@pytest.mark.parametrize("suite,device,arms,steps,batch", [
+    ("screen", "cuda", 5, 2000, 64),
+    ("smoke", "cpu", 3, 8, 4),
+])
+def test_a100_plan_cell_executes_real_planner_with_matched_budgets(
+        tmp_path, suite, device, arms, steps, batch):
+    cells, settings = _a100_settings({"SUITE": suite, "DEVICE": device, "SAVE_TO_DRIVE": False})
+    settings.update(WORK_ROOT=tmp_path, Path=Path, datetime=datetime, timezone=timezone, uuid=uuid)
+    # The pilot's globals may remain in an existing runtime; the new plan must
+    # not incorporate its weights or normalizer.
+    settings["CHECKPOINT"] = tmp_path / "old-pilot/checkpoint.pt"
+    exec(compile(cells["plan"], "a100-plan", "exec"), settings)
+    plan = settings["plan"]
+    assert len(plan["runs"]) == arms
+    assert plan["test_split_used"] is False
+    assert plan["evaluation_splits"] == ["calibration", "val"]
+    assert settings["DRIVE_RUN"] is None
+    assert not settings["RUN_ROOT"].exists()  # Planning does not launch training.
+    for run in plan["runs"]:
+        configs = [stage["config"] for stage in run["stages"]]
+        assert sum(config["steps"] for config in configs) == steps
+        assert all(config["batch_size"] == batch for config in configs)
+        assert all(config["device"] == device for config in configs)
+        assert all("init" not in config and "checkpoint" not in config for config in configs)
+    calls = []
+    settings.update(subprocess=SimpleNamespace(run=lambda *args, **kwargs: calls.append((args, kwargs))),
+                    sys=sys, DATA=tmp_path / "v2-sceneholdout", REPO=tmp_path / "new-repo")
+    exec(compile(cells["train"], "a100-train", "exec"), settings)
+    command = calls[0][0][0]
+    assert "--init" not in command
+    assert str(settings["CHECKPOINT"]) not in command
+    assert command[command.index("--data") + 1] == str(settings["DATA"])
+    assert calls[0][1]["check"] is True
 
 
 def test_default_is_bounded_pilot_and_evaluation_does_not_open_test():
