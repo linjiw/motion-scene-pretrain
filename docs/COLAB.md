@@ -3,10 +3,12 @@
 [Open the notebook](https://colab.research.google.com/github/linjiw/motion-scene-pretrain/blob/main/notebooks/MotionScene_Pretrain_Colab.ipynb).
 
 1. Select **Runtime → Change runtime type → GPU**.
-2. Put the separately supplied `kimodo-passage-h25-f100-v1.tar.xz` archive in `My Drive/motion-scene-pretrain/`. Alternatively select `DATA_SOURCE = upload` in the first cell and choose the file when prompted. The archive is approximately 435 MiB and is not hosted in the public code repository.
+2. Have the separately supplied `kimodo-passage-h25-f100-v1.tar.xz` archive ready on your computer. Cell 3 opens a file picker if the archive is missing from `My Drive/motion-scene-pretrain/`. Alternatively, put it in that Drive folder beforehand, or set `DRIVE_ARCHIVE_PATH` to its actual location. The archive is approximately 435 MiB and is not hosted in the public code repository.
 3. Leave `PROFILE = pilot` for the first run and use **Runtime → Run all**. Authorize Drive if requested. Change `SAVE_TO_DRIVE` to false if you prefer downloading completed results manually.
 
 The notebook keeps Colab's installed PyTorch/CUDA build, installs the package without replacing its dependencies, checks the GPU, copies the archive to VM-local storage, verifies its pinned SHA256, safely extracts it, verifies all dataset files, and runs an eight-step CPU smoke check before the selected training recipe.
+
+If an older copy of the notebook stops at cell 3 with **`FileNotFoundError` after Drive mounts**, the dataset has not been found at the configured path. Set `DATA_SOURCE = "upload"` in cell 1, rerun cell 1 and cell 3, and select the archive from your computer; then continue with cell 4. There is no need to restart the runtime. Current copies open the picker automatically when the Drive file is missing. Upload the actual archive supplied with the handoff, not a ZIP of the GitHub repository. Browser uploads stay in the current Colab runtime; to avoid uploading again in a future session, store the archive in Drive at the configured path. Saving results to Drive does not also save the dataset there.
 
 | Setting | Behavior |
 |---|---|
@@ -29,4 +31,4 @@ The notebook source is `notebooks/MotionScene_Pretrain_Colab.ipynb`; `python scr
 
 Colab storage and runtime behavior follow its [official FAQ](https://research.google.com/colaboratory/faq.html), which recommends transferring archives to VM storage before extracting and notes that runtime resources/lifetimes vary.
 
-Validation on October 15, 2026: 51 CPU tests passed, the notebook passed Jupyter schema validation, and its preview/training/calibration/report cells completed a real-data CPU smoke run for masked-to-flow learning. Drive copies and browser downloads were simulated locally. A hosted Colab GPU session has not been executed as part of this check.
+Validation on October 15, 2026: 56 CPU tests passed, including missing-Drive-file upload recovery, existing Drive files, cache reuse, and canceled/incorrect uploads. The notebook passed Jupyter schema validation; its preview/training/calibration/report cells previously completed a real-data CPU smoke run for masked-to-flow learning. Drive operations and browser uploads/downloads were simulated locally. A hosted Colab GPU session has not been executed as part of this check.

@@ -24,7 +24,7 @@ Learn motion representations and two-second futures **without RL**. This noteboo
 
 **Before Run all**
 1. Select **Runtime → Change runtime type → GPU**.
-2. Put `kimodo-passage-h25-f100-v1.tar.xz` in your Google Drive folder `motion-scene-pretrain`, or select **upload** below and choose the archive when prompted. The archive is about **435 MiB**. It is supplied separately from the public code repository.
+2. Have the separately supplied `kimodo-passage-h25-f100-v1.tar.xz` archive ready on your computer (about **435 MiB**). Cell 3 opens a file picker if the archive is not already in your Google Drive folder `motion-scene-pretrain`. The public code repository does not include the dataset.
 3. Leave **pilot** selected for the first run. Authorize Drive when prompted if using it.
 
 The data contain generated reference motions with hindsight scenes, not physical collision labels. A lower training loss does not establish navigation performance.
@@ -102,21 +102,17 @@ from google.colab import drive, files
 import tempfile
 from motion_scene_pretrain.data import sha256
 
+if DATA_SOURCE not in {"drive", "upload"}:
+    raise ValueError("DATA_SOURCE must be drive or upload")
 if DATA_SOURCE == "drive" or SAVE_TO_DRIVE:
     drive.mount("/content/drive")
 transfer = json.loads((REPO / "manifests/transfer_package.json").read_text())
-CACHE = Path("/content/motion-scene-cache")
+CACHE = WORK_ROOT / "motion-scene-cache"
 CACHE.mkdir(exist_ok=True)
 ARCHIVE = CACHE / transfer["archive"]
 
-if ARCHIVE.exists() and sha256(ARCHIVE) == transfer["archive_sha256"]:
-    print("Reusing the already verified local archive.")
-elif DATA_SOURCE == "drive":
-    source = Path(DRIVE_ARCHIVE_PATH)
-    if not source.is_file():
-        raise FileNotFoundError(f"Upload the supplied dataset archive to {source}, or choose DATA_SOURCE='upload'.")
-    shutil.copyfile(source, ARCHIVE)
-elif DATA_SOURCE == "upload":
+def upload_archive():
+    print("Use the dataset archive supplied with the project handoff (about 435 MiB).")
     print(f"Choose {transfer['archive']} in the file picker.")
     # An empty upload folder avoids Colab renaming the file on retries.
     with tempfile.TemporaryDirectory(prefix="motion-scene-upload-") as folder:
@@ -126,13 +122,28 @@ elif DATA_SOURCE == "upload":
             uploaded = files.upload()
         finally:
             os.chdir(previous)
+        if not uploaded:
+            raise RuntimeError("No file selected. Download the dataset archive from the project handoff to your computer, then rerun cell 3.")
         if set(uploaded) != {transfer["archive"]}:
-            raise ValueError(f"Choose only the archive named {transfer['archive']}")
+            raise ValueError(f"Choose only the archive named {transfer['archive']}, then rerun cell 3.")
         shutil.copyfile(Path(folder)/transfer["archive"], ARCHIVE)
         del uploaded  # Release the browser upload's in-memory bytes.
+
+if ARCHIVE.is_file() and sha256(ARCHIVE) == transfer["archive_sha256"]:
+    print("Reusing the already verified local archive.")
+elif DATA_SOURCE == "drive":
+    source = Path(DRIVE_ARCHIVE_PATH)
+    if source.is_file():
+        shutil.copyfile(source, ARCHIVE)
+    else:
+        print(f"Drive mounted, but the dataset archive was not found at: {source}")
+        print("The public repository contains the code; the dataset must be transferred separately.")
+        print("Opening the upload picker instead. If the archive is elsewhere in Drive, cancel, update DRIVE_ARCHIVE_PATH in cell 1, and rerun cells 1 and 3.")
+        upload_archive()
 else:
-    raise ValueError("DATA_SOURCE must be drive or upload")
+    upload_archive()
 print(f"Local archive: {ARCHIVE} ({ARCHIVE.stat().st_size / 2**20:.1f} MiB)")
+print("Next: cell 4 verifies the checksum and unpacks the dataset. Browser uploads are stored in this runtime only.")
 ''', "load-data")
 
 cell("code", '''
