@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "dimension": 65,
+  "fps": 50,
+  "joint_order_source_sha256": "e827ef2e1631547e6f5829cc452d8ceaf9462efe0463ea5fee12181aea8008d1",
+  "joint_names": [
+    "left_hip_pitch_joint",
+    "left_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_pitch_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint"
+  ],
+  "state_slices": {
+    "root_height": [
+      0,
+      1
+    ],
+    "gravity_in_root": [
+      1,
+      4
+    ],
+    "planar_velocity": [
+      4,
+      6
+    ],
+    "yaw_rate": [
+      6,
+      7
+    ],
+    "joint_position": [
+      7,
+      36
+    ],
+    "joint_velocity": [
+      36,
+      65
+    ]
+  },
+  "obstacle_channels": [
+    "center_x",
+    "center_y",
+    "center_z",
+    "yaw",
+    "half_x",
+    "half_y",
+    "half_z",
+    "radius",
+    "sphere_flag"
+  ],
+  "goal_channels": [
+    "local_x",
+    "local_y",
+    "cos_delta_yaw",
+    "sin_delta_yaw"
+  ],
+  "units": {
+    "length": "metres",
+    "angles": "radians",
+    "time": "seconds"
+  },
+  "coordinates": "z up, obstacles local to last observed root xy/yaw; planar velocity in instantaneous heading frame",
+  "future_velocity": "forward difference",
+  "last_history_velocity": "previous observed difference, heading transformed",
+  "grounding": "inherited source datum, not SONIC grounded",
+  "source_kind": "reference states, not controller commands"
+}

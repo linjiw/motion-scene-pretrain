@@ -1,0 +1,17 @@
+{
+  "prepared_date": "2026-10-15",
+  "dataset_directory": "kimodo-passage-h25-f100-v1",
+  "archive": "kimodo-passage-h25-f100-v1.tar.xz",
+  "archive_bytes": 456167632,
+  "archive_sha256": "6f94d60e3a6bd5b6c3560b445dbe95f00d75ed3dff8cb520fa0108d474eebc6d",
+  "dataset_manifest_sha256": "1d65ecce47b37dbb3ffce6b651484f79f4567a5a15f929f80c79c7bb56c8659a",
+  "expanded_bytes": 669130771,
+  "samples": 20000,
+  "source_clips": 868,
+  "source_groups": 65,
+  "history_frames": 25,
+  "future_frames": 100,
+  "fps": 50,
+  "storage": "Separate private machine-to-machine transfer; no motion arrays in GitHub",
+  "qualification": "Generated kinematic reference pairs, not physical execution"
+}

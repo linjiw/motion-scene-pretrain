@@ -1,0 +1,9 @@
+{
+  "mode": "flow", "device": "cuda", "seed": 0,
+  "steps": 15000, "batch_size": 16, "lr": 0.0002,
+  "sampling": "group_scene", "mask_probability": 0.4,
+  "reconstruction_weight": 0.2, "forecast_weight": 0.1,
+  "cpu_threads": 4, "workers": 2,
+  "log_every": 100, "eval_every": 1000, "val_batches": 8,
+  "model": {"width": 256, "heads": 8, "layers": 4, "fps": 50.0}
+}

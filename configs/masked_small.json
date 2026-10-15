@@ -1,0 +1,8 @@
+{
+  "mode": "masked", "device": "cuda", "seed": 0,
+  "steps": 5000, "batch_size": 32, "lr": 0.0003,
+  "sampling": "group_scene", "mask_probability": 0.4,
+  "cpu_threads": 4, "workers": 2,
+  "log_every": 100, "eval_every": 1000, "val_batches": 8,
+  "model": {"width": 128, "heads": 4, "layers": 3, "fps": 50.0}
+}
